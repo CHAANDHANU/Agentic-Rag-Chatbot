@@ -6,7 +6,7 @@ from langchain.memory import ConversationBufferMemory
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.tools.retriever import create_retriever_tool
-from langchain.agents import initialize_agent, AgentType
+from langchain.agents import initialize_agent, AgentType, AgentExecutor
 import os
 import docx
 import fitz  # PyMuPDF
@@ -97,17 +97,17 @@ async def upload_source(file: UploadFile = None, url: str = Form(None)):
 
         # Create retriever tool
         retriever = vectorstore.as_retriever(search_type="mmr", search_kwargs={"k": 3})
-        retriever_tool = create_retriever_tool(
+        retriever_tools[source_name] = {
+            "retriever": retriever,
+            "tool": create_retriever_tool(
             retriever,
             name=f"{source_name}_retriever",
             description=f"Search knowledge inside {source_name}."
         )
-
-        # Store tool
-        retriever_tools[source_name] = retriever_tool
+    }
 
         return {
-            "source": "en.wikipedia.org/wiki/OpenAI",
+            "source": source_name,
             "stored_chunks": len(chunks),
             "content_preview": content[:500]
         }
@@ -123,18 +123,29 @@ async def chat(req: ChatRequest):
     if not message:
         return {"response": "⚠️ Please enter a message."}
 
-    if retriever_tools:
-        agent = initialize_agent(
-            tools=list(retriever_tools.values()),
-            llm=llm,
-            agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-            verbose=True
-        )
-        result = agent.invoke({"input": message})
-    else:
-        response = llm.invoke(message).content
+    try:
+        if retriever_tools:
+            # Take the first retriever
+            source, data = list(retriever_tools.items())[0]
+            retriever = data["retriever"]
 
-    return {"response": response}
+            docs = retriever.get_relevant_documents(message)
+
+            if docs:
+                context = "\n".join([doc.page_content for doc in docs])
+                prompt = f"Context from {source}:\n{context}\n\nQuestion: {message}"
+                response = llm.invoke(prompt).content
+            else:
+                response = "❌ Sorry, I couldn't find information about that in the uploaded documents."
+        else:
+            response = "⚠️ Please upload a document or provide a URL first."
+
+        return {"response": response}
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 
 
 # -------- Debug Info Endpoint -------- #
